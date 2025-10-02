@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # NEW: System Instruction for improved writing style and personality
     system_instruction = (
         "You are a helpful and friendly AI assistant. Your name is GeminiBot. "
         "Provide clear, concise, and informative answers. "
@@ -39,7 +38,6 @@ try:
         "You can use emojis where appropriate to make the conversation more engaging."
     )
 
-    # MODIFIED: Changed model to 'gemini-pro' and added the system instruction
     model = genai.GenerativeModel(
         model_name='gemini-2.5-pro',
         system_instruction=system_instruction
@@ -67,67 +65,77 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del chat_sessions[chat_id]
     await update.message.reply_text("✨ Fresh start! Our previous conversation has been cleared.")
 
-# --- Main Message Handler (MODIFIED for Streaming) ---
+# --- Main Message Handler (MODIFIED with Robust Streaming) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     user_text = update.message.text
     
-    # Show "typing..." action initially
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
         if chat_id not in chat_sessions:
-            # The system prompt is now part of the model, so we don't need to add history here.
             chat_sessions[chat_id] = model.start_chat(history=[])
             logger.info(f"New chat session started for chat_id: {chat_id}")
         
         chat = chat_sessions[chat_id]
         
-        # NEW: Streaming logic for a faster perceived response
         logger.info(f"Sending message from chat_id {chat_id} to Gemini (streaming)...")
         
-        # Send the message and get a streaming response
         response_stream = await asyncio.to_thread(chat.send_message, user_text, stream=True)
         
-        full_response = ""
-        # Send an initial placeholder message
         sent_message = await update.message.reply_text("🤔")
         
+        full_response_text = ""
         buffer = ""
-        last_sent_text = ""
+        last_edit_time = 0
         
         for chunk in response_stream:
             buffer += chunk.text
-            # Edit the message in chunks to avoid hitting Telegram's rate limits
-            if len(buffer) - len(last_sent_text) > 75:
-                full_response += buffer
-                last_sent_text = full_response
-                buffer = ""
-                try:
-                    await context.bot.edit_message_text(
-                        text=full_response + " ▌", # Add a cursor effect
-                        chat_id=sent_message.chat_id,
-                        message_id=sent_message.message_id,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                except BadRequest as e:
-                    if "Message is not modified" not in str(e):
-                        logger.warning(f"Error editing message: {e}")
-        
-        # Send any remaining text in the buffer
-        full_response += buffer
-        
-        # Final edit to remove the cursor and show the complete message
-        await context.bot.edit_message_text(
-            text=full_response,
-            chat_id=sent_message.chat_id,
-            message_id=sent_message.message_id,
-            parse_mode=ParseMode.MARKDOWN
-        )
+            current_time = asyncio.get_event_loop().time()
+            
+            # Update message every 1.5 seconds or when a significant amount of text is buffered
+            if current_time - last_edit_time > 1.5 or len(buffer) > 100:
+                new_text = full_response_text + buffer
+                # Avoid editing if text hasn't changed
+                if new_text != sent_message.text:
+                    try:
+                        await context.bot.edit_message_text(
+                            text=new_text + " ▌",
+                            chat_id=sent_message.chat_id,
+                            message_id=sent_message.message_id,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        full_response_text = new_text
+                        buffer = "" # Clear buffer after successful edit
+                        sent_message.text = new_text # Update local copy
+                    except BadRequest as e:
+                        # This is the key fix: Ignore "Message is not modified" and Markdown parse errors
+                        if "Message is not modified" not in str(e) and "Can't parse entities" not in str(e):
+                            logger.warning(f"Error editing message, will retry: {e}")
+                last_edit_time = current_time
+
+        # Final update with the complete text, removing the cursor
+        final_text = full_response_text + buffer
+        try:
+            await context.bot.edit_message_text(
+                text=final_text,
+                chat_id=sent_message.chat_id,
+                message_id=sent_message.message_id,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                 # If the final Markdown is still broken, send as plain text
+                logger.error(f"Final Markdown failed: {e}. Sending as plain text.")
+                await context.bot.edit_message_text(
+                    text=final_text,
+                    chat_id=sent_message.chat_id,
+                    message_id=sent_message.message_id
+                )
 
     except Exception as e:
         logger.error(f"An error occurred while handling message for chat_id {chat_id}: {e}", exc_info=True)
-        await update.message.reply_text("Sorry, an error occurred. Please try again or start a /new conversation.")
+        await update.message.reply_text("Sorry, a critical error occurred. Please start a /new conversation.")
 
 # --- Bot Setup and Main Execution ---
 def run_bot():
