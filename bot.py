@@ -1,79 +1,113 @@
-import os
 import logging
+import os
 import google.generativeai as genai
-from telegram import Update, constants
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ChatAction
 
 # --- Configuration ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Get API keys from environment variables for security
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Configure the Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
-# Use the stable gemini-1.0-pro model
-model = genai.GenerativeModel('gemini-1.0-pro')
-
-# Set up logging
+# Set up logging to see errors
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- Bot Command Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_name = update.effective_user.first_name
-    await update.message.reply_text(f"👋 Hello, {user_name}! I'm a bot powered by Gemini. Ask me anything!")
+# --- Gemini AI Configuration ---
+# Configure the generative AI client
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Using gemini-1.5-flash for speed and cost-effectiveness
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    logger.info("Google GenAI configured successfully.")
+except Exception as e:
+    logger.error(f"Error configuring Google GenAI: {e}")
+    # If the API key is invalid, the bot can't start.
+    # We exit here because the bot is non-functional without the model.
+    exit()
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_html("Simply send me a message, and I will generate a response. Use /start to begin.")
+# --- Conversation Memory ---
+# A dictionary to store conversation history for each chat
+# Key: chat_id, Value: Gemini chat session object
+chat_sessions = {}
 
-# --- Main Message Handler (IMPROVED) ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message_text = update.message.text
-    # Show "typing..." action to the user
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
-    
+# --- Telegram Bot Command Handlers ---
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a welcome message when the /start command is issued."""
+    welcome_message = (
+        "👋 Hello! I'm a Gemini-powered AI bot.\n\n"
+        "I can remember our conversation. To start over, just send the /new command.\n\n"
+        "How can I help you today?"
+    )
+    await update.message.reply_text(welcome_message)
+
+async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Starts a new conversation, clearing the history."""
+    chat_id = update.message.chat_id
+    if chat_id in chat_sessions:
+        del chat_sessions[chat_id]  # Delete the old session
+    await update.message.reply_text("✨ I've cleared our conversation history. Let's start a fresh chat!")
+
+# --- Main Message Handler ---
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all non-command text messages and interacts with the Gemini API."""
+    chat_id = update.message.chat_id
+    user_text = update.message.text
+
+    # Show a "typing..." action to the user for better UX
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
     try:
-        # Send the prompt to Gemini
-        response = model.generate_content(message_text)
+        # Check if a chat session already exists for this user
+        if chat_id not in chat_sessions:
+            # If not, create a new one
+            chat_sessions[chat_id] = model.start_chat(history=[])
+            logger.info(f"New chat session started for chat_id: {chat_id}")
         
-        # --- NEW: Check for safety blocks or empty response ---
-        if not response.parts:
-            # This handles cases where the response was blocked for safety
-            await update.message.reply_text("I'm sorry, my safety filters prevented me from responding to that. Please try a different topic.")
-            logger.warning(f"Gemini response for '{message_text}' was blocked or empty.")
-            return
+        # Get the existing chat session
+        chat = chat_sessions[chat_id]
+        
+        # Send the user's message to Gemini and get the response
+        response = await chat.send_message_async(user_text)
 
-        # Send the response back to the user
+        # Send Gemini's response back to the user
         await update.message.reply_text(response.text)
 
     except Exception as e:
-        logger.error(f"An error occurred while handling message: {e}")
-        await update.message.reply_text("An error occurred while processing your request. Please try again later.")
+        logger.error(f"An error occurred while handling message for chat_id {chat_id}: {e}")
+        # Inform the user that something went wrong
+        await update.message.reply_text("Sorry, I encountered an error while processing your request. Please try again or start a /new conversation.")
 
-# --- Main Bot Execution ---
-def main() -> None:
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not found in environment variables!")
+# --- Bot Setup and Main Execution ---
+
+def main():
+    """Starts the bot."""
+    if not TELEGRAM_TOKEN:
+        logger.error("TELEGRAM_TOKEN environment variable not set!")
         return
     if not GEMINI_API_KEY:
-        logger.error("GEMINI_API_KEY not found in environment variables!")
+        logger.error("GEMINI_API_KEY environment variable not set!")
         return
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
+    # Create the Application and pass it your bot's token.
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Add handlers for commands
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("new", new_command))
+
+    # Add a handler for all text messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("Bot is starting polling...")
+
+    # Start the Bot
+    logger.info("Bot is starting...")
     application.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
