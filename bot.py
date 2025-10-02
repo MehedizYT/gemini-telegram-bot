@@ -30,12 +30,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Gemini AI Configuration ---
+# ADDED A CHECK HERE: If the key is missing, we log it clearly and stop.
+if not GEMINI_API_KEY:
+    logger.critical("FATAL ERROR: GEMINI_API_KEY environment variable not found!")
+    exit()
+
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
     logger.info("Google GenAI configured successfully.")
 except Exception as e:
-    logger.error(f"Error configuring Google GenAI: {e}")
+    # ADDED DETAILED LOGGING HERE
+    logger.critical(f"FATAL ERROR: Could not configure Google GenAI. Check your API key. Details: {e}", exc_info=True)
     exit()
 
 # --- Conversation Memory ---
@@ -58,7 +64,6 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Main Message Handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles all non-command text messages and interacts with the Gemini API."""
     chat_id = update.message.chat_id
     user_text = update.message.text
 
@@ -71,25 +76,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         chat = chat_sessions[chat_id]
         
-        logger.info(f"Sending message from chat_id {chat_id} to Gemini...")
+        logger.info(f"Attempting to send message to Gemini for chat_id {chat_id}...")
         
-        # THIS IS THE KEY FIX: Run the synchronous (blocking) Gemini call
-        # in a separate thread so it doesn't block the async event loop.
         response = await asyncio.to_thread(chat.send_message, user_text)
         
-        logger.info(f"Received response from Gemini for chat_id {chat_id}.")
+        # ADDED SUCCESS LOG
+        logger.info(f"Successfully received response from Gemini for chat_id {chat_id}.")
         
         await update.message.reply_text(response.text)
 
     except Exception as e:
-        logger.error(f"An error occurred while handling message for chat_id {chat_id}: {e}", exc_info=True)
-        await update.message.reply_text("Sorry, I encountered an error. Please try again or start a /new conversation.")
+        # THIS IS THE MOST IMPORTANT CHANGE: Log the full error traceback
+        logger.error(f"An error occurred in handle_message for chat_id {chat_id}. Error details: {e}", exc_info=True)
+        await update.message.reply_text("Sorry, I encountered a critical error with the AI service. The administrator has been notified.")
 
 # --- Bot Setup and Main Execution ---
 def run_bot():
-    """Sets up and runs the Telegram bot."""
-    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
-        logger.error("TELEGRAM_TOKEN or GEMINI_API_KEY environment variables not set!")
+    if not TELEGRAM_TOKEN:
+        logger.critical("FATAL ERROR: TELEGRAM_TOKEN environment variable not set!")
         return
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
