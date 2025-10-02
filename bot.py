@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import asyncio
 from flask import Flask
 import google.generativeai as genai
 from telegram import Update
@@ -8,25 +9,20 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.constants import ChatAction
 
 # --- Flask App for Render Health Check ---
-# This part is the "trick" to keep the free Render web service alive.
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    # Render sends a request to this endpoint to check if the service is alive.
     return "I'm alive!", 200
 
 def run_flask():
-    # Get the port from the environment variable Render sets. Default to 8080 for local testing.
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
 # --- Bot Configuration ---
-# Get API keys from environment variables for security
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Set up logging to see errors
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -46,9 +42,7 @@ except Exception as e:
 chat_sessions = {}
 
 # --- Telegram Bot Command Handlers ---
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message when the /start command is issued."""
     welcome_message = (
         "👋 Hello! I'm a Gemini-powered AI bot.\n\n"
         "I can remember our conversation. To start over, just send the /new command.\n\n"
@@ -57,14 +51,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_message)
 
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Starts a new conversation, clearing the history."""
     chat_id = update.message.chat_id
     if chat_id in chat_sessions:
         del chat_sessions[chat_id]
     await update.message.reply_text("✨ I've cleared our conversation history. Let's start a fresh chat!")
 
 # --- Main Message Handler ---
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles all non-command text messages and interacts with the Gemini API."""
     chat_id = update.message.chat_id
@@ -78,22 +70,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"New chat session started for chat_id: {chat_id}")
         
         chat = chat_sessions[chat_id]
-        response = await chat.send_message_async(user_text)
+        
+        logger.info(f"Sending message from chat_id {chat_id} to Gemini...")
+        
+        # THIS IS THE KEY FIX: Run the synchronous (blocking) Gemini call
+        # in a separate thread so it doesn't block the async event loop.
+        response = await asyncio.to_thread(chat.send_message, user_text)
+        
+        logger.info(f"Received response from Gemini for chat_id {chat_id}.")
+        
         await update.message.reply_text(response.text)
 
     except Exception as e:
-        logger.error(f"An error occurred while handling message for chat_id {chat_id}: {e}")
+        logger.error(f"An error occurred while handling message for chat_id {chat_id}: {e}", exc_info=True)
         await update.message.reply_text("Sorry, I encountered an error. Please try again or start a /new conversation.")
 
 # --- Bot Setup and Main Execution ---
-
 def run_bot():
     """Sets up and runs the Telegram bot."""
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN environment variable not set!")
-        return
-    if not GEMINI_API_KEY:
-        logger.error("GEMINI_API_KEY environment variable not set!")
+    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
+        logger.error("TELEGRAM_TOKEN or GEMINI_API_KEY environment variables not set!")
         return
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -105,9 +101,6 @@ def run_bot():
     application.run_polling()
 
 if __name__ == '__main__':
-    # Run Flask app in a separate thread
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
-    
-    # Run the bot in the main thread
     run_bot()
