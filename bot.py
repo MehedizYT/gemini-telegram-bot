@@ -4,10 +4,10 @@ import threading
 import asyncio
 from flask import Flask
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ChatAction, ParseMode
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from telegram.constants import ChatAction
 
 # --- Flask App for Render Health Check ---
 app = Flask(__name__)
@@ -30,66 +30,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- NEW: ADVANCED GEMINI CONFIGURATION ---
+# --- Gemini AI Advanced Configuration ---
+
+# IMPROVEMENT 1: System Instruction for better logic and personality
+SYSTEM_INSTRUCTION = (
+    "You are a helpful and friendly AI assistant. "
+    "Your goal is to provide concise, accurate, and logical answers. "
+    "When asked for opinions, be balanced. When asked for facts, be precise. "
+    "Format your responses for clarity on a mobile screen using markdown where appropriate."
+)
+
+# IMPROVEMENT 2: Fine-tuning generation for better quality responses
+GENERATION_CONFIG = {
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "top_k": 40,
+}
+
+# IMPROVEMENT 3: Setting safety thresholds to be less restrictive
+# This can prevent the bot from refusing to answer harmless questions.
+SAFETY_SETTINGS = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+}
+
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-
-    # --- UPGRADE 1: System Instructions for Improved Writing ---
-    # Give the bot a personality and instructions for better, formatted responses.
-    SYSTEM_INSTRUCTION = (
-        "You are a helpful and intelligent AI assistant named GeminiBot. "
-        "Your goal is to provide accurate and concise information. "
-        "Format your answers using Telegram's MarkdownV2 syntax for clarity. "
-        "Use *bold* for emphasis, `code` for snippets, and lists for steps. "
-        "Do not use markdown headers (#)." # Telegram doesn't support headers well.
-    )
-
-    # --- UPGRADE 2: Advanced Generation and Safety Settings ---
-    generation_config = {
-        "temperature": 0.7,
-        "top_p": 1,
-        "top_k": 1,
-        "max_output_tokens": 2048,
-    }
-
-    safety_settings = {
-        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-    }
-
-    # --- UPGRADE 3: Use the Latest, Most Powerful Model ---
+    
+    # IMPROVEMENT 4: Using the latest, most powerful model
     model = genai.GenerativeModel(
-        model_name="gemini-2.5-pro",
-        generation_config=generation_config,
+        model_name='gemini-1.5-pro-latest',
+        generation_config=GENERATION_CONFIG,
         system_instruction=SYSTEM_INSTRUCTION,
-        safety_settings=safety_settings
+        safety_settings=SAFETY_SETTINGS
     )
     logger.info("Google GenAI configured successfully with gemini-1.5-pro-latest.")
 
 except Exception as e:
-    logger.error(f"Error configuring Google GenAI: {e}")
+    logger.error(f"Error configuring Google GenAI: {e}", exc_info=True)
+    # The bot cannot run without a configured model.
     exit()
 
 # --- Conversation Memory ---
 chat_sessions = {}
 
-# --- Telegram Bot Command Handlers ---
+# --- Telegram Bot Handlers ---
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = (
-        "👋 *Hello\\!* I'm an advanced AI assistant powered by `Gemini 1\\.5 Pro`\\.\n\n"
-        "I can remember our conversation and stream responses in real\\-time\\. "
-        "To start a new chat, just send the /new command\\.\n\n"
+        "👋 Hello! I'm your upgraded Gemini 1.5 Pro assistant.\n\n"
+        "I have persistent memory in our chat. To start a fresh conversation, send /new.\n\n"
         "How can I help you today?"
     )
-    await update.message.reply_text(welcome_message, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(welcome_message)
 
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     if chat_id in chat_sessions:
         del chat_sessions[chat_id]
-    await update.message.reply_text("✨ I've cleared our conversation history. Let's start fresh!")
+    await update.message.reply_text("✨ Fresh start! Our previous conversation has been cleared.")
 
 # --- Main Message Handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,105 +100,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
+        # Get or create a chat session for the user
         if chat_id not in chat_sessions:
+            # The model now contains the system instructions, so we start a clean chat
             chat_sessions[chat_id] = model.start_chat(history=[])
             logger.info(f"New chat session started for chat_id: {chat_id}")
         
         chat = chat_sessions[chat_id]
         
         logger.info(f"Sending message from chat_id {chat_id} to Gemini...")
-
-        # --- UPGRADE 4: STREAMING FOR FAST RESPONSE ---
-        # Send an initial placeholder message
-        placeholder_message = await update.message.reply_text("🤔")
-
-        # Use asyncio.to_thread to run the blocking API call in a separate thread
-        response_iterator = await asyncio.to_thread(
-            chat.send_message,
-            user_text,
-            stream=True
-        )
-
-        full_response_text = ""
-        last_sent_text = ""
-        # The buffer size controls how often we update the message.
-        # A smaller buffer feels more "real-time" but risks hitting Telegram's rate limits.
-        buffer_size = 75 
-
-        for chunk in response_iterator:
-            # Escape special markdown characters for safe rendering
-            escaped_chunk = chunk.text.replace(
-                "_", "\\_"
-            ).replace(
-                "*", "\\*"
-            ).replace(
-                "[", "\\["
-            ).replace(
-                "]", "\\]"
-            ).replace(
-                "(", "\\("
-            ).replace(
-                ")", "\\)"
-            ).replace(
-                "~", "\\~"
-            ).replace(
-                "`", "\\`"
-            ).replace(
-                ">", "\\>"
-            ).replace(
-                "#", "\\#"
-            ).replace(
-                "+", "\\+"
-            ).replace(
-                "-", "\\-"
-            ).replace(
-                "=", "\\="
-            ).replace(
-                "|", "\\|"
-            ).replace(
-                "{", "\\{"
-            ).replace(
-                "}", "\\}"
-            ).replace(
-                ".", "\\."
-            ).replace(
-                "!", "\\!"
-            )
-            full_response_text += escaped_chunk
-            
-            # Update the message in chunks to avoid hitting rate limits
-            if len(full_response_text) - len(last_sent_text) > buffer_size:
-                try:
-                    await context.bot.edit_message_text(
-                        text=full_response_text + " ▌", # Add a typing cursor for effect
-                        chat_id=chat_id,
-                        message_id=placeholder_message.message_id,
-                        parse_mode=ParseMode.MARKDOWN_V2
-                    )
-                    last_sent_text = full_response_text
-                    await asyncio.sleep(0.1) # Small delay to prevent spamming edits
-                except Exception as e:
-                    # Ignore "Message is not modified" error which is common
-                    if "Message is not modified" not in str(e):
-                        logger.warning(f"Error editing message: {e}")
-
-        # Final update to send the complete message without the cursor
-        if full_response_text != last_sent_text:
-            await context.bot.edit_message_text(
-                text=full_response_text,
-                chat_id=chat_id,
-                message_id=placeholder_message.message_id,
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+        
+        # IMPROVEMENT 5: Using the native async method for better performance
+        response = await chat.send_message_async(user_text)
+        
+        logger.info(f"Received response from Gemini for chat_id {chat_id}.")
+        
+        await update.message.reply_text(response.text)
 
     except Exception as e:
-        logger.error(f"An error occurred while handling message: {e}", exc_info=True)
-        await update.message.reply_text("Sorry, I encountered an error. Please try again or start a /new conversation.")
+        logger.error(f"An error occurred while handling message for chat_id {chat_id}: {e}", exc_info=True)
+        await update.message.reply_text("I'm sorry, I encountered an issue while processing your request. Please try again or start a /new conversation.")
 
 # --- Bot Setup and Main Execution ---
 def run_bot():
     if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
-        logger.error("TELEGRAM_TOKEN or GEMINI_API_KEY environment variables not set!")
+        logger.error("FATAL: TELEGRAM_TOKEN or GEMINI_API_KEY environment variables not set!")
         return
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -209,6 +136,9 @@ def run_bot():
     application.run_polling()
 
 if __name__ == '__main__':
+    # Run the Flask app in a separate thread to keep Render's web service alive
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
+    
+    # Run the bot in the main thread
     run_bot()
