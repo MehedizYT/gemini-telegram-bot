@@ -41,7 +41,7 @@ try:
     # I've updated it to 'gemini-1.5-pro-latest' for demonstration.
     # If 'gemini-2.5-pro' is a specific custom model or a future model you're targeting,
     # you can revert this line.
-    model = genai.GenerativeModel('gemini-2.5-pro') 
+    model = genai.GenerativeModel('gemini-1.5-pro-latest') 
     logger.info("Google GenAI configured successfully with 'gemini-1.5-pro-latest'.")
 except Exception as e:
     logger.error(f"Error configuring Google GenAI: {e}")
